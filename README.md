@@ -65,47 +65,33 @@ ST-HTM solves this with four simple ideas:
 ## Architecture
 
 ```mermaid
-graph TD
-    A["Raw Video Clips<br>[B, T, 3, 224, 224]"] --> B("GPU Coherent Augmentations<br>Affine Warp + Color Jitter + Frame Dropout")
-    B --> C["DINOv2 ViT-S/14 Backbone<br>Gradually Unfrozen · Layers (2, 5, 8, 11)"]
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#ffffff', 'primaryTextColor': '#000000', 'primaryBorderColor': '#000000', 'lineColor': '#000000', 'clusterBkg': '#ffffff', 'clusterBorder': '#000000'}}}%%
+graph LR
+    IN["&laquo;input&raquo;<br>Video Clips<br>[B, T, 3, 224, 224]"]
+    BB["&laquo;backbone&raquo;<br>DINOv2 ViT-S/14<br>Blocks 2, 5, 8, 11"]
 
-    C -->|"Blocks 2, 5, 8<br>[B*T, 3, 384, 16, 16]"| P_SKIP["Multi-Scale Pyramid Adapters<br>ConvTranspose2d (strides 3.5, 7, 14)"]
-
-    subgraph ST_CORE["Spatio-Temporal Core (Deepest Level: Block 11)"]
-        C -->|"Block 11<br>[B, T, 256, 384]"| D["LayerNorm + Mask Token + Time Emb"]
-        D --> E["Per-Patch Temporal Reshape<br>[B*256, T, 384]"]
-        E --> F{"Bidirectional Mamba SSM<br>2-Layer Fwd + 2-Layer Bwd (d_state=16)"}
-        F --> G["Residual Linear Fusion (768 → 384)"]
-        G --> H["Spatial Transformer Layer<br>6-Head MHSA · [B*T, 256, 384]"]
+    subgraph CORE ["Spatio-Temporal Core"]
+        TM["&laquo;temporal&raquo;<br>BiTemporalMamba<br>2L Fwd/Bwd (d=16)"]
+        SP["&laquo;spatial&raquo;<br>Transformer Layer<br>6-Head MHSA"]
     end
 
-    subgraph DEC_HEAD["SegFormer All-MLP Decode Head"]
-        P_SKIP --> I["4-Level Feature Pyramid<br>Channels: [96, 192, 384, 384]"]
-        H -->|"Reshape [B*T, 384, 16, 16]"| I
-        I --> J("SegformerDecodeHead<br>Hidden Dim = 256 · Dropout = 0.1")
-        J --> K("Bilinear Upsample<br>[B, T, 8, 224, 224]")
-    end
+    PYR["&laquo;adapter&raquo;<br>Feature Pyramid<br>Strides 3.5, 7, 14"]
+    DEC["&laquo;decoder&raquo;<br>SegFormer Head<br>All-MLP + Upsample"]
+    OUT["&laquo;output&raquo;<br>8-Class Masks<br>[B, T, 8, 224, 224]"]
+    LOSS["&laquo;loss&raquo;<br>CE + Focal Tversky + Dice"]
 
-    K --> OUT["Multi-Class Instrument Masks (8 Classes)"]
+    IN --> BB
+    BB -->|"Blocks 2, 5, 8"| PYR
+    BB -->|"Block 11"| TM
+    TM --> SP
+    PYR --> DEC
+    SP --> DEC
+    DEC --> OUT
+    LOSS -.->|"gradients"| DEC
+    LOSS -.->|"LLRD"| CORE
 
-    Loss["Cross-Entropy + Foreground Focal Tversky + Soft Dice<br>(FP32 · Ignore Index = 255)"] -.->|End-to-End Gradients| DEC_HEAD
-    Loss -.->|LLRD 0.8^depth| ST_CORE
-
-    classDef coralHighlight fill:#F45B69,stroke:#0B2027,stroke-width:2px,color:#FFFFFF;
-    classDef darkBlock fill:#0B2027,stroke:#70A9A1,stroke-width:2px,color:#F6F1D1;
-    classDef tealBlock fill:#40798C,stroke:#0B2027,stroke-width:1.5px,color:#F6F1D1;
-    classDef aquaBlock fill:#70A9A1,stroke:#0B2027,stroke-width:1.5px,color:#0B2027;
-    classDef lossConstraint fill:#0B2027,stroke:#40798C,stroke-width:1.5px,stroke-dasharray: 4 4,color:#F6F1D1;
-
-    class A,F coralHighlight;
-    class OUT darkBlock;
-    class B,C,J,K tealBlock;
-    class D,E,G,H,I,P_SKIP aquaBlock;
-    class Loss lossConstraint;
-
-    style ST_CORE fill:#0B2027,stroke:#40798C,stroke-width:2px,color:#F6F1D1
-    style DEC_HEAD fill:#0B2027,stroke:#70A9A1,stroke-width:2px,color:#F6F1D1
-    linkStyle default stroke:#40798C,stroke-width:1.5px;
+    classDef uml fill:#ffffff,stroke:#000000,stroke-width:1.5px,color:#000000;
+    class IN,BB,TM,SP,PYR,DEC,OUT,LOSS uml;
 ```
 
 ### Built With
