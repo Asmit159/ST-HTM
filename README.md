@@ -1,162 +1,292 @@
-# ST-HTM: Spatio-Temporal Hybrid Transformer-Mamba for Surgical Vision
+<div align="center">
 
-An occlusion-robust, linear-time **Spatio-Temporal Hybrid Transformer-Mamba (ST-HTM)** architecture designed for real-time surgical instrument segmentation and trajectory tracking across robotic surgery sequences. Built and evaluated on the **MICCAI EndoVis 2017/2018 Challenge datasets**, ST-HTM replaces computationally restrictive quadratic temporal self-attention ($O(N^2)$) with **bidirectional State Space Models (Mamba)**, enabling continuous-time kinematic tracking across multi-frame dropouts (blood, cauterization smoke, and tool cross-occlusions).
+# ST-HTM: Spatio-Temporal Hybrid Transformer-Mamba
+
+**Gradually Unfrozen DINOv2 · Bidirectional Temporal Mamba · Multi-Scale SegFormer**
+
+<p align="center">
+  <img src="https://img.shields.io/badge/PyTorch%202.11-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch"/>
+  <img src="https://img.shields.io/badge/CUDA%2013.0-76B900?style=for-the-badge&logo=nvidia&logoColor=white" alt="CUDA"/>
+  <img src="https://img.shields.io/badge/DINOv2%20ViT--S%2F14-0064E0?style=for-the-badge&logo=meta&logoColor=white" alt="DINOv2"/>
+  <img src="https://img.shields.io/badge/BiMamba%20SSM-7C3AED?style=for-the-badge&logo=lightning&logoColor=white" alt="BiMamba"/>
+  <img src="https://img.shields.io/badge/SegFormer%20Head-FF9D00?style=for-the-badge&logo=huggingface&logoColor=white" alt="SegFormer"/>
+</p>
+
+<p align="center">
+  <a href="results/report.md"><img src="https://img.shields.io/badge/Val%20mIoU%20·%2084.22%25-10B981?style=flat-square" alt="Val mIoU"/></a>
+  <a href="results/report.md"><img src="https://img.shields.io/badge/Tool%20IoU%20·%2091.02%25-06B6D4?style=flat-square" alt="Tool IoU"/></a>
+  <a href="results/report.md"><img src="https://img.shields.io/badge/Unseen%20mIoU%20·%2091.58%25-3B82F6?style=flat-square" alt="Unseen mIoU"/></a>
+  <a href="results/hardware.png"><img src="https://img.shields.io/badge/154.7%20FPS%20(T4)-F97316?style=flat-square" alt="Throughput"/></a>
+  <a href="results/metrics.json"><img src="https://img.shields.io/badge/29.21M%20Params-A855F7?style=flat-square" alt="Params"/></a>
+  <a href="https://huggingface.co/datasets/tyluan/Endovis2017"><img src="https://img.shields.io/badge/EndoVis%202017-EC4899?style=flat-square" alt="Dataset"/></a>
+</p>
+</div>
 
 ---
 
-## System Overview
-
-Endoscopic surgical scenes present rapid camera motion, tissue deformation, and severe visual dropouts. Frame-by-frame spatial models suffer from temporal amnesia and mask flickering, while conventional Spatio-Temporal Vision Transformers incur quadratic memory scaling that triggers Out-of-Memory (OOM) failures on standard GPU hardware during long temporal contexts.
-
-ST-HTM solves these bottlenecks through a decoupled, two-stage paradigm:
-
-* **Spatial Foundation Encoding (Frozen DINOv2):** Extracts robust, part-level spatial semantic patch embeddings per frame without task-specific encoder backpropagation.
-* **Offline Spatial Feature Caching:** Pre-extracts and reshapes spatial token representations into static `.pt` tensors, bypassing video decoding I/O bottlenecks and cutting training runtimes by over 10x.
-* **Bidirectional Mamba Sequence Modeling:** Flattens spatial-temporal state spaces and passes them through bidirectional selective scan SSMs, capturing forward and backward kinematic trajectories in strictly linear $O(N)$ time.
-* **Alternate Spatial Refinement & U-Net Decoder:** Restores high-resolution spatial masks using skip connections and hybrid Compound Dice + Focal Tversky loss functions.
+**ST-HTM** is a fast, occlusion-aware video segmentation model built for robotic surgery on the **MICCAI EndoVis 2017** dataset. It combines a **gradually unfrozen DINOv2 ViT-S/14** backbone, **bidirectional Mamba** layers for linear-time temporal tracking, a lightweight spatial Transformer, and a **SegFormer All-MLP decoder** to segment 8 surgical instrument classes cleanly across video frames.
 
 ---
 
-## Neural Architecture
+## Visual Showcase
+<div align="center">
+    
+#### Clean Unseen Video Prediction (`seq10.mp4`)
+<video src="https://github.com/user-attachments/assets/c678d57d-d7a4-404e-8ea0-220c84765402" controls width="100%" poster="results/videos/seq10_stills.jpg"></video>
+
+#### Simulated Multi-Frame Occlusion Test (`seq10_occlusion.mp4`)
+<video src="https://github.com/user-attachments/assets/e99d59dd-03a4-4adf-9a3e-fea554edeaf0" controls width="100%" poster="results/videos/seq10_occlusion_stills"></video>
+
+</div>
+
+<details>
+<summary><b>View Keyframe Stills (Input | ST-HTM Prediction | Expert Ground Truth)</b></summary>
+<br>
+<p align="center">
+  <img width="696" height="1160" alt="seq10_occlusion_stills" src="https://github.com/user-attachments/assets/aac795fc-6851-4b24-8ab0-f594d8dd6880" />
+<img width="696" height="1160" alt="seq10_stills" src="https://github.com/user-attachments/assets/c7736e0a-e0ad-4077-a79b-0f62082ec50a" />
+</p>
+</details>
+
+---
+
+## How It Works
+
+Surgical video is hard for standard vision models: metallic tools reflect light, blood and tissue move constantly, and the camera shifts quickly. Frame-by-frame models flicker between frames, while full spatio-temporal Transformers run out of memory on long clips.
+
+ST-HTM solves this with four simple ideas:
+
+- **Clean, Video-Ordered Caching (`prepare_cache.py`):** Downloads `tyluan/Endovis2017`, rebuilds the true video frame order, applies one fixed crop per video to remove black borders, cleans noisy mask edges (`IGNORE = 255`), and saves `448×448` `uint8` tensors to `data/frames/`.
+- **Gradual Backbone Unfreezing (`model.py`, `train.py`):** Starts with DINOv2 frozen so the new head can stabilize, then unfreezes 3 Transformer blocks at a time (epochs `4, 7, 10, 13`, and embeddings at `16`) using layer-wise learning rate decay (`0.8^depth`).
+- **Linear-Time Temporal Tracking (`BiTemporalMamba`):** Runs forward and backward 2-layer Mamba SSMs (`d_state = 16`) per spatial patch across time in $O(T)$ time, with a learned `mask_token` for hidden or occluded frames.
+- **Multi-Scale SegFormer Decoding:** Pulls features from 4 DINOv2 blocks `(2, 5, 8, 11)`, refines the deepest level with BiMamba and a 6-head spatial Transformer, builds a 4-level feature pyramid, and decodes masks with `SegformerDecodeHead`.
+
+---
+
+## Architecture
 
 ```mermaid
 graph TD
-    A["Raw Endoscopic Video Frames<br>[B, T, 3, 224, 224]"] --> B("Borders Cropped & Normalized<br>OpenCV / Albumentations")
-    B --> C["Frozen DINOv2 Backbone<br>(dinov2_vits14)"]
-    C --> D[("Offline Cached Tensors<br>[B, T, 384, 16, 16] .pt")]
+    A["Raw Video Clips<br>[B, T, 3, 224, 224]"] --> B("GPU Coherent Augmentations<br>Affine Warp + Color Jitter + Frame Dropout")
+    B --> C["DINOv2 ViT-S/14 Backbone<br>Gradually Unfrozen · Layers (2, 5, 8, 11)"]
 
-    subgraph ST_CORE["Hybrid Spatio-Temporal Core"]
-    D --> E["Spatial-Temporal Tensor Serialization<br>[B, T*256, 384]"]
-    E --> F{"Bidirectional Mamba Block<br>Selective State Spaces"}
-    F --> G["Temporal Trajectory Memory"]
-    G --> H["Lightweight Spatial Self-Attention<br>(Boundary & Tissue Disambiguation)"]
+    C -->|"Blocks 2, 5, 8<br>[B*T, 3, 384, 16, 16]"| P_SKIP["Multi-Scale Pyramid Adapters<br>ConvTranspose2d (strides 3.5, 7, 14)"]
+
+    subgraph ST_CORE["Spatio-Temporal Core (Deepest Level: Block 11)"]
+        C -->|"Block 11<br>[B, T, 256, 384]"| D["LayerNorm + Mask Token + Time Emb"]
+        D --> E["Per-Patch Temporal Reshape<br>[B*256, T, 384]"]
+        E --> F{"Bidirectional Mamba SSM<br>2-Layer Fwd + 2-Layer Bwd (d_state=16)"}
+        F --> G["Residual Linear Fusion (768 → 384)"]
+        G --> H["Spatial Transformer Layer<br>6-Head MHSA · [B*T, 256, 384]"]
     end
 
-    subgraph DEC_HEAD["Multi-Scale Decoder"]
-    H --> I["Tensor Unflattening & Projection<br>[B, T, 384, 16, 16]"]
-    I --> J("Decoder Stage 1: ConvTranspose + GELU<br>[B, T, 192, 32, 32]")
-    J --> K("Decoder Stage 2: Bilinear + ConvBlock<br>[B, T, 96, 64, 64]")
-    K --> L("Decoder Stage 3: Upsample Block<br>[B, T, 32, 128, 128]")
-    L --> M("Projection Head: 1x1 Conv<br>[B, T, Num_Classes, 224, 224]")
+    subgraph DEC_HEAD["SegFormer All-MLP Decode Head"]
+        P_SKIP --> I["4-Level Feature Pyramid<br>Channels: [96, 192, 384, 384]"]
+        H -->|"Reshape [B*T, 384, 16, 16]"| I
+        I --> J("SegformerDecodeHead<br>Hidden Dim = 256 · Dropout = 0.1")
+        J --> K("Bilinear Upsample<br>[B, T, 8, 224, 224]")
     end
 
-    M --> OUT["Final Multi-Tool Segmentation Masks & Trajectories"]
+    K --> OUT["Multi-Class Instrument Masks (8 Classes)"]
 
-    Loss["Compound Dice + Focal Tversky Loss"] -.->|Class-Imbalance Constraint| DEC_HEAD
-    Loss -.->|Kinematic Trajectory Alignment| ST_CORE
+    Loss["Cross-Entropy + Foreground Focal Tversky + Soft Dice<br>(FP32 · Ignore Index = 255)"] -.->|End-to-End Gradients| DEC_HEAD
+    Loss -.->|LLRD 0.8^depth| ST_CORE
 
-    %% Class Styling
     classDef coralHighlight fill:#F45B69,stroke:#0B2027,stroke-width:2px,color:#FFFFFF;
     classDef darkBlock fill:#0B2027,stroke:#70A9A1,stroke-width:2px,color:#F6F1D1;
     classDef tealBlock fill:#40798C,stroke:#0B2027,stroke-width:1.5px,color:#F6F1D1;
     classDef aquaBlock fill:#70A9A1,stroke:#0B2027,stroke-width:1.5px,color:#0B2027;
-    classDef creamBlock fill:#0B2027,stroke:#F6F1D1,stroke-width:1.5px,color:#F6F1D1;
     classDef lossConstraint fill:#0B2027,stroke:#40798C,stroke-width:1.5px,stroke-dasharray: 4 4,color:#F6F1D1;
 
     class A,F coralHighlight;
-    class OUT,D darkBlock;
-    class B,C,M tealBlock;
-    class E,G,H,I,J,K,L aquaBlock;
+    class OUT darkBlock;
+    class B,C,J,K tealBlock;
+    class D,E,G,H,I,P_SKIP aquaBlock;
     class Loss lossConstraint;
 
     style ST_CORE fill:#0B2027,stroke:#40798C,stroke-width:2px,color:#F6F1D1
     style DEC_HEAD fill:#0B2027,stroke:#70A9A1,stroke-width:2px,color:#F6F1D1
-
     linkStyle default stroke:#40798C,stroke-width:1.5px;
-
 ```
 
----
+### Built With
 
-## Hardware & Sequence Scaling Benchmark
+<div align="center">
 
-Comparing GPU VRAM footprint and compute latency between a standard Spatio-Temporal Transformer (TimeSformer / ViT-Temporal) and our linear-time **ST-HTM** architecture across increasing temporal window lengths on a single NVIDIA GPU (batch size = 1).
+| Component | Tools & Libraries | Role |
+| :---: | :---: | :---: |
+| **Backbone** | `dinov2_vits14` (`torch.hub`) | Extracts multi-layer visual features (blocks `2, 5, 8, 11`) with gradual unfreezing |
+| **Temporal Engine** | `MambaModel` (`transformers`), optional `mamba_ssm` & `causal_conv1d` | Forward & backward per-patch SSMs (`d_state=16`) with PyTorch reference fallback |
+| **Decoder** | `nn.TransformerEncoderLayer`, `SegformerDecodeHead` | Spatial refinement and 4-scale pyramid fusion into 8-class segmentation logits |
+| **Loss & Optimizer** | Custom FP32 `FocalTverskyDiceLoss`, Fused `AdamW`, Cosine Warmup | Handles extreme class imbalance while ignoring noisy mask edges (`255`) |
+| **Training** | `torch.distributed` (DDP), `SyncBatchNorm`, `torch.amp` (`FP16`/`BF16`) | Dual-T4 / A100 training with coherent GPU-side clip augmentations (`F.affine_grid`) |
+| **Data & Video** | Hugging Face `datasets`, `OpenCV`, `NumPy`, `imageio[ffmpeg]`, `Matplotlib` | Dataset caching, mask cleanup, profiling plots, and side-by-side MP4 rendering |
 
-| Sequence Window ($T$) | ViT-Temporal VRAM | ST-HTM VRAM | Memory Reduction (%) | ViT Latency | ST-HTM Latency |
-| --- | --- | --- | --- | --- | --- |
-| **16 frames** | 6.84 GB | **3.82 GB** | **44.1%** | 48 ms | **24 ms** |
-| **32 frames** | 14.22 GB | **5.41 GB** | **61.9%** | 118 ms | **46 ms** |
-| **64 frames** | *OOM (>24 GB)* | **8.15 GB** | **>66.0%** | N/A | **89 ms** |
-| **128 frames** | *OOM* | **13.48 GB** | **Linear $O(N)$** | N/A | **174 ms** |
-
----
-
-## Quantitative Validation & Occlusion Benchmark
-
-Evaluated on the **MICCAI EndoVis 2017 & 2018 Instrument Segmentation Challenges**. The occlusion benchmark injects synthetic multi-frame visual dropouts (smoke, blood splatters, complete camera blackouts) for consecutive frame sequences ($k \in \{1, 3, 5, 10\}$).
-
-### EndoVis Challenge Benchmark Comparison
-
-| Architecture | Temporal Modeling | Clean mIoU (%) | Clean mcIoU (%) | 5-Frame Blackout mIoU (%) | Dropout Degradation ($\Delta$) |
-| --- | --- | --- | --- | --- | --- |
-| **U-Net Baseline** | None (Frame-by-Frame) | 75.4% | 34.2% | 11.2% | -64.2% |
-| **Swin-UNETR** | Spatial-Only Window | 81.2% | 46.8% | 18.5% | -62.7% |
-| **ST-ViT Baseline** | Full Quadratic Attention | 83.6% | 51.2% | 61.4% | -22.2% |
-| **ST-HTM (Proposed)** | **Bidirectional Mamba SSM** | **84.8%** | **53.9%** | **78.2%** | **-6.6% (Robust)** |
-
-### Multi-Frame Occlusion Stress-Test Profile
-
-| Consecutive Occluded Frames | Spatial Baseline mIoU | Temporal ViT mIoU | ST-HTM mIoU | Trajectory Status |
-| --- | --- | --- | --- | --- |
-| **0 Frames (Clean)** | 81.2% | 83.6% | **84.8%** | Exact Spatial Overlap |
-| **1 Frame Dropout** | 44.8% | 79.1% | **83.1%** | Negligible Drift |
-| **3 Frames Dropout** | 22.3% | 70.4% | **80.9%** | Kinematics Preserved |
-| **5 Frames Dropout** | 11.2% | 61.4% | **78.2%** | Stable Boundary Extrapolation |
-| **10 Frames Dropout** | 4.1% | 38.6% | **69.5%** | Preserves Instrument Heading |
+</div>
 
 ---
 
-## Loss Formulation
+## Validation Results (EndoVis 2017)
 
-To resolve extreme foreground-background class imbalance where surgical tool tips occupy less than 3% of the image field, ST-HTM optimizes a joint **Focal Tversky** and **Soft Dice** objective:
+Tested on the full validation split (`901` frames across `10` sequences, upsampled to `448×448` before `argmax`) using the **Epoch 15** checkpoint (`best_st_htm.pt`, `224×224` input). Multi-class means are averaged over tool classes present in the ground truth (`support > 0`).
 
-$$\mathcal{L}_{\text{total}} = \lambda_1 \mathcal{L}_{\text{Dice}} + \lambda_2 \mathcal{L}_{\text{FT}}$$
+### Overall Performance
 
-$$\mathcal{L}_{\text{FT}} = \left( 1 - \frac{\sum_{i=1}^N p_{ti} g_{ti} + \epsilon}{\sum_{i=1}^N p_{ti} g_{ti} + \alpha \sum_{i=1}^N p_{0i} g_{ti} + \beta \sum_{i=1}^N p_{ti} g_{0i} + \epsilon} \right)^{\gamma}$$
+<div align="center">
 
-* $\alpha = 0.3, \beta = 0.7$: Asymmetrically penalizes false negatives to preserve faint instrument tips.
-* $\gamma = 0.75$: Focuses gradient updates on hard, occluded pixel states.
+| Split | mIoU (%) | mDice (%) | mPrecision (%) | mRecall (%) | Pixel Acc (%) | Binary Tool IoU (%) | Binary Tool Dice (%) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **All Validation (Seq 1–10)** | **84.22%** | **91.05%** | 90.68% | 92.58% | 98.30% | **91.02%** | **95.30%** |
+| **Seen Videos (Seq 1–8)** | 84.48% | 91.23% | 90.76% | 92.79% | 97.76% | 89.36% | 94.38% |
+| **Unseen Videos (Seq 9–10)** | **91.58%** | **95.57%** | 93.42% | 97.99% | 99.36% | **95.13%** | **97.50%** |
+
+</div>
+> *Note:* Sequences 9 (1 frame) and 10 (300 frames, `large_needle_driver`) are completely unseen surgical videos during training.
+<p align="center"><img width="2080" height="546" alt="training_curves" src="https://github.com/user-attachments/assets/7e87b8b2-79d5-4d95-b8e2-262817fdfcec" />
+</p>
+### Per-Class Breakdown
+
+<div align="center">
+
+| Instrument Class | IoU (%) | Dice (%) | Precision (%) | Recall (%) | Specificity (%) | GT Pixels |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `background` | 98.57% | 99.28% | 99.56% | 99.01% | 97.05% | 154,896,099 |
+| `large_needle_driver` | **95.51%** | **97.70%** | 98.21% | 97.20% | 99.86% | 13,191,949 |
+| `monopolar_curved_scissors` | **93.77%** | **96.79%** | 95.16% | 98.47% | 99.97% | 1,182,014 |
+| `vessel_sealer` | **85.71%** | **92.31%** | 96.32% | 88.61% | 99.96% | 2,281,336 |
+| `bipolar_forceps` | **80.00%** | **88.89%** | 95.48% | 83.15% | 99.90% | 4,499,395 |
+| `prograsp_forceps` | 66.09% | 79.58% | 68.22% | 95.49% | 99.49% | 2,036,336 |
+| `grasping_retractor` / `other` | — | — | — | — | 99.99% / 99.50% | 0 *(absent in val)* |
+
+</div>
+<p align="center"><img width="1820" height="624" alt="per_class_metrics" src="https://github.com/user-attachments/assets/fac8ca9b-0076-4ef8-913c-2ed8198b7340" /></p>
+<p align="center"><img width="1105" height="975" alt="confusion_matrix" src="https://github.com/user-attachments/assets/462a5c16-967f-4947-bec3-2640174c5d1a" /></p>
+
+### Temporal Stability (Per-Sequence Highlights)
+
+Prediction flicker (the share of pixels changing class between consecutive frames) stays closely aligned with ground-truth motion:
+
+<div align="center">
+
+| Sequence | Split | Frames | mIoU (%) | Tool IoU (%) | Pred Flicker (%) | GT Flicker (%) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Seq 3** | Seen | 75 | 95.70% | 95.70% | 12.50% | 12.37% |
+| **Seq 4** | Seen | 75 | 94.21% | 95.25% | 7.86% | 7.62% |
+| **Seq 5** | Seen | 75 | 92.07% | 92.68% | 11.84% | 11.58% |
+| **Seq 8** | Seen | 75 | 95.66% | 95.87% | 11.93% | 11.80% |
+| **Seq 10** | **Unseen** | 300 | **95.25%** | **95.13%** | **10.10%** | **10.17%** |
+
+</div>
+<p align="center"><img width="1300" height="520" alt="per_sequence" src="https://github.com/user-attachments/assets/511b5b0b-04ca-49c1-9c64-c580b482a1b4" /></p>
+<p align="center"><img width="1560" height="2054" alt="frame_timeline" src="https://github.com/user-attachments/assets/20e55421-5d65-43fc-be70-b64435a8a23b" /></p>
+
+### Occlusion Stress Test
+
+Consecutive frames ($k$) are blacked out and replaced with the learned `mask_token`, then scored strictly on the hidden frames:
+
+<div align="center">
+
+| Hidden Frames ($k$) | Hidden-Frame mIoU (%) | Hidden-Frame Tool IoU (%) |
+| :---: | :---: | :---: |
+| **0 (Clean Baseline)** | 60.15% *(84.22% GT-present)* | **91.02%** |
+| **1 Frame Hidden** | 39.87% | **48.63%** |
+| **2 Frames Hidden** | 36.25% | **41.91%** |
+| **3 Frames Hidden** | 30.85% | **33.00%** |
+| **5 Frames Hidden** | 20.06% | **21.02%** |
+| **8 Frames Hidden** | 10.54% | **7.98%** |
+| **10 Frames Hidden** | 9.94% | **9.27%** |
+
+</div>
+<p align="center"><img width="910" height="520" alt="occlusion_robustness" src="https://github.com/user-attachments/assets/517a9c31-24a1-4998-a202-3bce5238b26b" /></p>
 
 ---
 
-## Architectural Component Breakdown
+## Hardware & Scaling Benchmark
 
-| Module | Implementation | Input Shape | Output Shape | Parameters |
-| --- | --- | --- | --- | --- |
-| **Spatial Backbone** | `dinov2_vits14` (Frozen) | `[B*T, 3, 224, 224]` | `[B*T, 256, 384]` | 22.05 M *(frozen)* |
-| **Tensor Adapter** | Reshape + Norm | `[B, T, 256, 384]` | `[B, T*256, 384]` | ~0 M |
-| **Temporal Engine** | Bi-Mamba SSM Block | `[B, T*256, 384]` | `[B, T*256, 384]` | ~3.15 M |
-| **Spatial Attention** | Multi-Head Self-Attention | `[B*T, 256, 384]` | `[B*T, 256, 384]` | ~1.18 M |
-| **Spatial Re-Gridding** | Unflatten + Conv 1x1 | `[B, T, 256, 384]` | `[B, T, 384, 16, 16]` | ~0.15 M |
-| **Decoder Stage 1** | ConvTranspose2d + ResBlock | `[B*T, 384, 16, 16]` | `[B*T, 192, 32, 32]` | ~1.33 M |
-| **Decoder Stage 2** | Upsample + ConvBlock | `[B*T, 192, 32, 32]` | `[B*T, 96, 64, 64]` | ~0.33 M |
-| **Decoder Stage 3** | Upsample + ConvBlock | `[B*T, 96, 64, 64]` | `[B*T, 32, 128, 128]` | ~0.08 M |
-| **Segmentation Head** | Upsample + Conv2d ($1\times1$) | `[B*T, 32, 128, 128]` | `[B*T, C, 224, 224]` | ~0.01 M |
-| **Total Trainable** | **Temporal + Decoder Pipeline** | — | — | **~6.23 M** |
+Measured on a single **NVIDIA Tesla T4** (`PyTorch 2.11.0+cu130`, `FP16`, `224×224` input, unfused PyTorch Mamba scan).
+
+- **Model Size:** `29.21M` parameters (`22.06M` DINOv2 + `7.15M` temporal/SegFormer head) · `111.4 MB` FP32
+- **Compute:** `18.40 GFLOPs / frame` (`12.25` DINOv2 + `6.15` head)
+- **Online Streaming (1 new frame + cached 16-frame window):** `97.0 ms / frame` (`8.45 ms` DINOv2 + `88.57 ms` unfused head) = **10.3 FPS** at **856 MB** peak VRAM
+
+### Clip Length Scaling (Batch Size = 1)
+
+<div align="center">
+
+| Clip Length ($T$) | p50 Latency (ms) | p95 Latency (ms) | Throughput (FPS) | Peak VRAM (MB) |
+| :---: | :---: | :---: | :---: | :---: |
+| **4 frames** | 29.8 ms | 31.4 ms | 133.6 FPS | 384 MB |
+| **8 frames** | 55.1 ms | 55.5 ms | 145.2 FPS | 607 MB |
+| **16 frames** | 111.5 ms | 112.4 ms | 143.6 FPS | 891 MB |
+| **32 frames** | 228.0 ms | 232.9 ms | 139.9 FPS | 1,620 MB |
+| **64 frames** | 479.1 ms | 484.6 ms | 133.5 FPS | 3,077 MB |
+
+</div>
+
+### Batched Throughput ($T = 16$)
+
+<div align="center">
+
+| Clips / Batch | p50 Latency (ms) | p95 Latency (ms) | Throughput (FPS) | Peak VRAM (MB) |
+| :---: | :---: | :---: | :---: | :---: |
+| **1** | 105.7 ms | 106.5 ms | 151.3 FPS | 891 MB |
+| **2** | 206.7 ms | 209.2 ms | **154.7 FPS** | 1,940 MB |
+| **4** | 417.7 ms | 420.6 ms | 153.2 FPS | 3,717 MB |
+| **8** | 866.5 ms | 871.8 ms | 148.0 FPS | 7,273 MB |
+
+</div>
+<p align="center"><img width="2080" height="546" alt="hardware" src="https://github.com/user-attachments/assets/35952f23-b73b-45c7-a146-24915ff612a7" /></p>
+
+---
+
+## Loss Function
+
+Computed in `FP32` over valid pixels (`target != 255`) in `loss.py`, combining **Cross-Entropy**, **Foreground Focal Tversky**, and **Soft Dice**:
+
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{FT}} + \mathcal{L}_{\text{Dice}} + \lambda_{\text{CE}}\,\mathcal{L}_{\text{CE}}$$
+
+$$\mathcal{L}_{\text{FT}} = \frac{1}{\vert{}C_{\text{fg}}\vert{}} \sum_{c \in C_{\text{fg}}} \left( 1 - \frac{\text{TP}_c + s}{\text{TP}_c + \alpha\,\text{FN}_c + \beta\,\text{FP}_c + s} \right)^{\gamma}$$
+
+- $\alpha = 0.7,\ \beta = 0.3$: Penalizes missed tool pixels more heavily so thin shafts and jaws aren't lost.
+- $\gamma = 0.75,\ \lambda_{\text{CE}} = 1.0,\ s = 1.0$: Keeps focus on hard boundaries while stabilizing probabilities.
 
 ---
 
 ## Repository Structure
 
-```
+```text
 ST-HTM/
-├── configs/
-│   └── mamba_temporal.yaml         # Sequence lengths, SSM state dims, loss weights
-├── data/
-│   ├── raw/                        # EndoVis 2017/2018 raw sequences
-│   └── cached_tensors/             # Offline cached [T, 384, 16, 16] .pt files
-├── models/
-│   ├── __init__.py
-│   ├── dinov2_extractor.py         # Frozen spatial token wrapper
-│   ├── mamba_block.py              # Bidirectional Mamba-SSM module
-│   ├── attention.py                # Alternate spatial refinement layer
-│   └── decoder.py                  # Multi-scale convolutional U-Net head
-├── scripts/
-│   ├── 1_extract_and_cache.py      # OpenCV border crop + DINOv2 cache pipeline
-│   ├── 2_train.py                  # Mixed-precision training on cached tensors
-│   ├── 3_eval_benchmark.py         # Standard test-set mIoU & mcIoU metrics
-│   └── 4_stress_test_occlusion.py  # Synthetic blackout / smoke injection engine
-├── requirements.txt
-└── README.md
+├── install_kernels.py      # Optional prebuilt CUDA wheel installer (causal_conv1d & mamba_ssm)
+├── prepare_cache.py        # Downloads EndoVis 2017, cleans masks, crops borders, caches 448px .pt files
+├── model.py                # DinoBackbone (gradual unfreeze), BiTemporalMamba, Spatial Transformer & SegFormer head
+├── loss.py                 # FP32 FocalTverskyDiceLoss (CE + Focal Tversky + Soft Dice)
+├── train.py                # Single/Multi-GPU DDP training, GPU augmentations, LLRD, auto-resume & early stopping
+├── infer.py                # AMP helpers, checkpoint loader & sliding-window predict_sequence()
+├── test.py                 # Full evaluation: accuracy, occlusion sweep, flicker stability, FLOPs/VRAM & plots
+├── make_video.py           # Side-by-side MP4 renderer (input | prediction | ground truth + occlusion demo)
+├── checkpoints/            # best_st_htm.pt, last.pt, history.json
+└── results/                # report.md, metrics.json, per_class.csv, plots & videos/
+```
 
+---
+
+## Quickstart
+
+```bash
+# 1. Install dependencies & optional fused Mamba CUDA kernels
+pip install -q transformers datasets opencv-python-headless "imageio[ffmpeg]" matplotlib
+python install_kernels.py
+
+# 2. Download EndoVis 2017 and build sequence-ordered 448px cache
+python prepare_cache.py
+
+# 3. Train (single GPU or multi-GPU DDP; auto-resumes from checkpoints/last.pt)
+torchrun --standalone --nproc_per_node=2 train.py
+
+# 4. Run full evaluation, occlusion stress test, hardware benchmark & plot generation
+python test.py
+
+# 5. Render showcase videos (clean + simulated occlusion)
+python make_video.py --seqs 10
+python make_video.py --seqs 10 --occlusion-demo
 ```
