@@ -29,22 +29,21 @@
 ---
 
 ## Visual Showcase
-<div align="center">
-    
+
 #### Clean Unseen Video Prediction (`seq10.mp4`)
-<video src="https://github.com/user-attachments/assets/c678d57d-d7a4-404e-8ea0-220c84765402" controls width="100%" poster="results/videos/seq10_stills.jpg"></video>
+
+https://github.com/user-attachments/assets/c678d57d-d7a4-404e-8ea0-220c84765402
 
 #### Simulated Multi-Frame Occlusion Test (`seq10_occlusion.mp4`)
-<video src="https://github.com/user-attachments/assets/e99d59dd-03a4-4adf-9a3e-fea554edeaf0" controls width="100%" poster="results/videos/seq10_occlusion_stills"></video>
 
-</div>
+https://github.com/user-attachments/assets/e99d59dd-03a4-4adf-9a3e-fea554edeaf0
 
 <details>
 <summary><b>View Keyframe Stills (Input | ST-HTM Prediction | Expert Ground Truth)</b></summary>
 <br>
 <p align="center">
-  <img width="696" height="1160" alt="seq10_occlusion_stills" src="https://github.com/user-attachments/assets/aac795fc-6851-4b24-8ab0-f594d8dd6880" />
-<img width="696" height="1160" alt="seq10_stills" src="https://github.com/user-attachments/assets/c7736e0a-e0ad-4077-a79b-0f62082ec50a" />
+  <img width="48%" alt="seq10_stills" src="https://github.com/user-attachments/assets/c7736e0a-e0ad-4077-a79b-0f62082ec50a" />
+  <img width="48%" alt="seq10_occlusion_stills" src="https://github.com/user-attachments/assets/aac795fc-6851-4b24-8ab0-f594d8dd6880" />
 </p>
 </details>
 
